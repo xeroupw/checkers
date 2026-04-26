@@ -12,6 +12,50 @@ use std::time::Duration;
 
 const SIZE: usize = 8;
 
+// checkers rule variant
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Variant {
+    Russian,
+    English,
+    Brazilian,
+    Turkish,
+}
+
+impl Variant {
+    // king slides multiple squares along a diagonal
+    fn flying_king(&self) -> bool {
+        matches!(self, Variant::Russian | Variant::Brazilian)
+    }
+
+    // regular pieces may capture backwards
+    fn backward_capture(&self) -> bool {
+        matches!(self, Variant::Russian | Variant::Brazilian)
+    }
+
+    // pieces move orthogonally instead of diagonally
+    fn orthogonal(&self) -> bool {
+        matches!(self, Variant::Turkish)
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Variant::Russian => "Russian",
+            Variant::English => "English (Draughts)",
+            Variant::Brazilian => "Brazilian",
+            Variant::Turkish => "Turkish",
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            Variant::Russian => "Flying kings  *  backward captures",
+            Variant::English => "Short kings  *  forward captures only",
+            Variant::Brazilian => "Flying kings  *  backward captures",
+            Variant::Turkish => "Orthogonal moves  *  no diagonal",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Piece {
     None,
@@ -66,24 +110,39 @@ struct Game {
     white_count: u8,
     black_count: u8,
     game_over: bool,
-    // pending bot move shown on next draw before executing
     bot_thinking: bool,
+    variant: Variant,
+    needs_clear: bool,
 }
 
 impl Game {
-    fn new() -> Self {
+    fn new(variant: Variant) -> Self {
         let mut board = [[Piece::None; SIZE]; SIZE];
-        for row in 0..3 {
-            for col in 0..SIZE {
-                if (row + col) % 2 == 1 {
+        if variant.orthogonal() {
+            // turkish: pieces on rows 1-2 (black) and 5-6 (white), all columns
+            for row in 1..3 {
+                for col in 0..SIZE {
                     board[row][col] = Piece::Black;
                 }
             }
-        }
-        for row in 5..SIZE {
-            for col in 0..SIZE {
-                if (row + col) % 2 == 1 {
+            for row in 5..7 {
+                for col in 0..SIZE {
                     board[row][col] = Piece::White;
+                }
+            }
+        } else {
+            for row in 0..3 {
+                for col in 0..SIZE {
+                    if (row + col) % 2 == 1 {
+                        board[row][col] = Piece::Black;
+                    }
+                }
+            }
+            for row in 5..SIZE {
+                for col in 0..SIZE {
+                    if (row + col) % 2 == 1 {
+                        board[row][col] = Piece::White;
+                    }
                 }
             }
         }
@@ -99,6 +158,8 @@ impl Game {
             black_count: 12,
             game_over: false,
             bot_thinking: false,
+            variant,
+            needs_clear: true,
         }
     }
 
@@ -109,6 +170,84 @@ impl Game {
             return vec![];
         }
         let mut moves = Vec::new();
+
+        if self.variant.orthogonal() {
+            // turkish: orthogonal (N/E/S/W), no diagonal
+            let forward_dirs: Vec<(i32, i32)> = if piece.is_king() {
+                vec![(-1, 0), (1, 0), (0, -1), (0, 1)]
+            } else if piece.is_white() {
+                vec![(-1, 0), (0, -1), (0, 1)]
+            } else {
+                vec![(1, 0), (0, -1), (0, 1)]
+            };
+            let capture_dirs: Vec<(i32, i32)> = vec![(-1, 0), (1, 0), (0, -1), (0, 1)];
+
+            if piece.is_king() {
+                for (dr, dc) in &forward_dirs {
+                    let mut dist = 1i32;
+                    loop {
+                        let nr = pos.row as i32 + dr * dist;
+                        let nc = pos.col as i32 + dc * dist;
+                        if nr < 0 || nr >= SIZE as i32 || nc < 0 || nc >= SIZE as i32 { break; }
+                        let to = Pos::new(nr as usize, nc as usize);
+                        if self.board[to.row][to.col] == Piece::None {
+                            moves.push((to, None));
+                            dist += 1;
+                        } else {
+                            let target = self.board[to.row][to.col];
+                            let is_enemy = if piece.is_white() { target.is_black() } else { target.is_white() };
+                            if is_enemy {
+                                let mut land = dist + 1;
+                                loop {
+                                    let jr = pos.row as i32 + dr * land;
+                                    let jc = pos.col as i32 + dc * land;
+                                    if jr < 0 || jr >= SIZE as i32 || jc < 0 || jc >= SIZE as i32 { break; }
+                                    let jump = Pos::new(jr as usize, jc as usize);
+                                    if self.board[jump.row][jump.col] == Piece::None {
+                                        moves.push((jump, Some(to)));
+                                        land += 1;
+                                    } else { break; }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for (dr, dc) in &forward_dirs {
+                    let nr = pos.row as i32 + dr;
+                    let nc = pos.col as i32 + dc;
+                    if nr >= 0 && nr < SIZE as i32 && nc >= 0 && nc < SIZE as i32 {
+                        let to = Pos::new(nr as usize, nc as usize);
+                        if self.board[to.row][to.col] == Piece::None {
+                            moves.push((to, None));
+                        }
+                    }
+                }
+                for (dr, dc) in &capture_dirs {
+                    let nr = pos.row as i32 + dr;
+                    let nc = pos.col as i32 + dc;
+                    if nr >= 0 && nr < SIZE as i32 && nc >= 0 && nc < SIZE as i32 {
+                        let to = Pos::new(nr as usize, nc as usize);
+                        let target = self.board[to.row][to.col];
+                        let is_enemy = if piece.is_white() { target.is_black() } else { target.is_white() };
+                        if is_enemy {
+                            let jr = pos.row as i32 + dr * 2;
+                            let jc = pos.col as i32 + dc * 2;
+                            if jr >= 0 && jr < SIZE as i32 && jc >= 0 && jc < SIZE as i32 {
+                                let jump = Pos::new(jr as usize, jc as usize);
+                                if self.board[jump.row][jump.col] == Piece::None {
+                                    moves.push((jump, Some(to)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return moves;
+        }
+
+        // diagonal variants (russian, english, brazilian)
         // all four diagonals for kings, forward-only for regular pieces
         let move_dirs: Vec<(i32, i32)> = if piece.is_king() {
             vec![(-1, -1), (-1, 1), (1, -1), (1, 1)]
@@ -118,9 +257,13 @@ impl Game {
             vec![(1, -1), (1, 1)]
         };
         // captures allowed in all four directions for regular pieces too (russian rules)
-        let capture_dirs: Vec<(i32, i32)> = vec![(-1, -1), (-1, 1), (1, -1), (1, 1)];
+        let capture_dirs: Vec<(i32, i32)> = if self.variant.backward_capture() || piece.is_king() {
+            vec![(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        } else {
+            move_dirs.clone()
+        };
 
-        if piece.is_king() {
+        if piece.is_king() && self.variant.flying_king() {
             // flying king: slides any number of squares, captures by jumping over an enemy
             for (dr, dc) in &move_dirs {
                 let mut dist = 1i32;
@@ -165,7 +308,7 @@ impl Game {
                 }
             }
         } else {
-            // regular piece: one step forward, but captures in all directions
+            // regular piece or short king: one step forward, captures per variant rules
             for (dr, dc) in &move_dirs {
                 let nr = pos.row as i32 + dr;
                 let nc = pos.col as i32 + dc;
@@ -437,7 +580,8 @@ impl Game {
     fn handle_key(&mut self, key: KeyCode) {
         if self.game_over {
             if key == KeyCode::Char('r') || key == KeyCode::Char('R') {
-                *self = Game::new();
+                let v = self.variant;
+                *self = Game::new(v);
             }
             return;
         }
@@ -492,7 +636,8 @@ impl Game {
                 }
             }
             KeyCode::Char('r') | KeyCode::Char('R') => {
-                *self = Game::new();
+                let v = self.variant;
+                *self = Game::new(v);
             }
             _ => {}
         }
@@ -502,7 +647,11 @@ impl Game {
 const CELL_W: u16 = 5;
 const CELL_H: u16 = 3;
 
-fn draw(stdout: &mut impl Write, game: &Game) -> io::Result<()> {
+fn draw(stdout: &mut impl Write, game: &mut Game) -> io::Result<()> {
+    if game.needs_clear {
+        queue!(stdout, terminal::Clear(ClearType::All))?;
+        game.needs_clear = false;
+    }
     queue!(stdout, cursor::MoveTo(0, 0))?;
 
     queue!(
@@ -691,7 +840,7 @@ fn draw(stdout: &mut impl Write, game: &Game) -> io::Result<()> {
         stdout,
         cursor::MoveTo(2, legend_y),
         SetForegroundColor(Color::DarkGrey),
-        Print("Arrows: cursor  Enter/Space: select/move  Esc: deselect  R: restart  Q: quit"),
+        Print("Arrows: cursor  Enter/Space: select/move  Esc: deselect  R: restart  M: menu  Q: quit"),
         ResetColor,
     )?;
 
@@ -757,9 +906,153 @@ fn draw(stdout: &mut impl Write, game: &Game) -> io::Result<()> {
         Print("(K) king"),
         ResetColor,
     )?;
+    queue!(
+        stdout,
+        cursor::MoveTo(turn_x, board_start_y + 12),
+        SetForegroundColor(Color::DarkGrey),
+        Print("Variant:"),
+    )?;
+    queue!(
+        stdout,
+        cursor::MoveTo(turn_x, board_start_y + 13),
+        SetForegroundColor(Color::Cyan),
+        Print(game.variant.label()),
+        ResetColor,
+    )?;
 
     stdout.flush()?;
     Ok(())
+}
+
+fn draw_menu(stdout: &mut impl Write, selected: usize, prev_selected: Option<usize>) -> io::Result<()> {
+    let variants = [
+        Variant::Russian,
+        Variant::English,
+        Variant::Brazilian,
+        Variant::Turkish,
+    ];
+
+    // full clear only on first draw
+    if prev_selected.is_none() {
+        queue!(stdout, terminal::Clear(ClearType::All))?;
+
+        queue!(
+            stdout,
+            cursor::MoveTo(2, 0),
+            SetForegroundColor(Color::Cyan),
+            SetAttribute(Attribute::Bold),
+            Print("  CHECKERS"),
+            SetAttribute(Attribute::Reset),
+        )?;
+
+        queue!(
+            stdout,
+            cursor::MoveTo(4, 2),
+            SetForegroundColor(Color::DarkGrey),
+            Print("Select a variant:"),
+            ResetColor,
+        )?;
+
+        queue!(
+            stdout,
+            cursor::MoveTo(4, 22),
+            SetForegroundColor(Color::DarkGrey),
+            Print("Up/Down: navigate    Enter/Space: confirm    Q: quit"),
+            ResetColor,
+        )?;
+    }
+
+    // redraw only the rows that changed (or all on first draw)
+    let redraw: Vec<usize> = if let Some(prev) = prev_selected {
+        vec![prev, selected]
+    } else {
+        (0..variants.len()).collect()
+    };
+
+    for &i in &redraw {
+        let variant = &variants[i];
+        let row = 4 + i as u16 * 4;
+        let is_sel = i == selected;
+
+        let (bg, fg_label, fg_desc) = if is_sel {
+            (
+                Color::Rgb { r: 30, g: 60, b: 90 },
+                Color::White,
+                Color::Rgb { r: 180, g: 220, b: 255 },
+            )
+        } else {
+            (
+                Color::Rgb { r: 20, g: 20, b: 30 },
+                Color::DarkGrey,
+                Color::Rgb { r: 80, g: 80, b: 100 },
+            )
+        };
+
+        let prefix = if is_sel { "▶ " } else { "  " };
+
+        queue!(
+            stdout,
+            cursor::MoveTo(4, row),
+            SetBackgroundColor(bg),
+            Print(" ".repeat(44)),
+            cursor::MoveTo(4, row + 1),
+            Print(" ".repeat(44)),
+            cursor::MoveTo(4, row + 2),
+            Print(" ".repeat(44)),
+            cursor::MoveTo(4, row + 3),
+            Print(" ".repeat(44)),
+            cursor::MoveTo(5, row + 1),
+            SetForegroundColor(fg_label),
+            SetAttribute(if is_sel { Attribute::Bold } else { Attribute::Dim }),
+            Print(format!("{}{}", prefix, variant.label())),
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(bg),
+            cursor::MoveTo(7, row + 2),
+            SetForegroundColor(fg_desc),
+            Print(variant.description()),
+            SetAttribute(Attribute::Reset),
+            ResetColor,
+        )?;
+    }
+
+    stdout.flush()?;
+    Ok(())
+}
+
+fn run_menu(stdout: &mut impl Write) -> io::Result<Option<Variant>> {
+    let variants = [
+        Variant::Russian,
+        Variant::English,
+        Variant::Brazilian,
+        Variant::Turkish,
+    ];
+    let mut selected = 0usize;
+    let mut prev_selected: Option<usize> = None;
+
+    loop {
+        draw_menu(stdout, selected, prev_selected)?;
+        prev_selected = Some(selected);
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(KeyEvent { code, kind: KeyEventKind::Press, .. }) = event::read()? {
+                match code {
+                    KeyCode::Up => {
+                        if selected > 0 { selected -= 1; }
+                    }
+                    KeyCode::Down => {
+                        if selected < variants.len() - 1 { selected += 1; }
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        return Ok(Some(variants[selected]));
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') => {
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -768,10 +1061,19 @@ fn main() -> io::Result<()> {
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
     execute!(stdout, terminal::Clear(ClearType::All))?;
 
-    let mut game = Game::new();
+    let variant = match run_menu(&mut stdout)? {
+        Some(v) => v,
+        None => {
+            execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
+            terminal::disable_raw_mode()?;
+            return Ok(());
+        }
+    };
+
+    let mut game = Game::new(variant);
 
     loop {
-        draw(&mut stdout, &game)?;
+        draw(&mut stdout, &mut game)?;
         stdout.flush()?;
 
         if !game.white_turn && !game.game_over {
@@ -789,6 +1091,14 @@ fn main() -> io::Result<()> {
             {
                 match code {
                     KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                    KeyCode::Char('m') | KeyCode::Char('M') => {
+                        execute!(&mut stdout, terminal::Clear(ClearType::All))?;
+                        let new_variant = match run_menu(&mut stdout)? {
+                            Some(v) => v,
+                            None => break,
+                        };
+                        game = Game::new(new_variant);
+                    }
                     other => game.handle_key(other),
                 }
             }
