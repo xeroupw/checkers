@@ -109,23 +109,78 @@ impl Game {
             return vec![];
         }
         let mut moves = Vec::new();
-        let dirs: Vec<(i32, i32)> = if piece.is_king() {
+        // all four diagonals for kings, forward-only for regular pieces
+        let move_dirs: Vec<(i32, i32)> = if piece.is_king() {
             vec![(-1, -1), (-1, 1), (1, -1), (1, 1)]
         } else if piece.is_white() {
             vec![(-1, -1), (-1, 1)]
         } else {
             vec![(1, -1), (1, 1)]
         };
+        // captures allowed in all four directions for regular pieces too (russian rules)
+        let capture_dirs: Vec<(i32, i32)> = vec![(-1, -1), (-1, 1), (1, -1), (1, 1)];
 
-        for (dr, dc) in &dirs {
-            let nr = pos.row as i32 + dr;
-            let nc = pos.col as i32 + dc;
-            if nr >= 0 && nr < SIZE as i32 && nc >= 0 && nc < SIZE as i32 {
-                let to = Pos::new(nr as usize, nc as usize);
-                if self.board[to.row][to.col] == Piece::None {
-                    moves.push((to, None));
-                } else {
-                    // try jump over enemy
+        if piece.is_king() {
+            // flying king: slides any number of squares, captures by jumping over an enemy
+            for (dr, dc) in &move_dirs {
+                let mut dist = 1i32;
+                loop {
+                    let nr = pos.row as i32 + dr * dist;
+                    let nc = pos.col as i32 + dc * dist;
+                    if nr < 0 || nr >= SIZE as i32 || nc < 0 || nc >= SIZE as i32 {
+                        break;
+                    }
+                    let to = Pos::new(nr as usize, nc as usize);
+                    if self.board[to.row][to.col] == Piece::None {
+                        moves.push((to, None));
+                        dist += 1;
+                    } else {
+                        // check if it's an enemy we can jump over
+                        let target = self.board[to.row][to.col];
+                        let is_enemy = if piece.is_white() {
+                            target.is_black()
+                        } else {
+                            target.is_white()
+                        };
+                        if is_enemy {
+                            // land on any empty square beyond the captured piece
+                            let mut land = dist + 1;
+                            loop {
+                                let jr = pos.row as i32 + dr * land;
+                                let jc = pos.col as i32 + dc * land;
+                                if jr < 0 || jr >= SIZE as i32 || jc < 0 || jc >= SIZE as i32 {
+                                    break;
+                                }
+                                let jump = Pos::new(jr as usize, jc as usize);
+                                if self.board[jump.row][jump.col] == Piece::None {
+                                    moves.push((jump, Some(to)));
+                                    land += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        } else {
+            // regular piece: one step forward, but captures in all directions
+            for (dr, dc) in &move_dirs {
+                let nr = pos.row as i32 + dr;
+                let nc = pos.col as i32 + dc;
+                if nr >= 0 && nr < SIZE as i32 && nc >= 0 && nc < SIZE as i32 {
+                    let to = Pos::new(nr as usize, nc as usize);
+                    if self.board[to.row][to.col] == Piece::None {
+                        moves.push((to, None));
+                    }
+                }
+            }
+            for (dr, dc) in &capture_dirs {
+                let nr = pos.row as i32 + dr;
+                let nc = pos.col as i32 + dc;
+                if nr >= 0 && nr < SIZE as i32 && nc >= 0 && nc < SIZE as i32 {
+                    let to = Pos::new(nr as usize, nc as usize);
                     let target = self.board[to.row][to.col];
                     let is_enemy = if piece.is_white() {
                         target.is_black()
